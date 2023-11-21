@@ -37,25 +37,48 @@ async fn my_async() ->  Result<(), Box<dyn std::error::Error>>{
 
     let mut client = ImageServiceClient::new(channel);
 
-    // let req =   k8s_cri::v1::PullImageRequest {
-    //     image: Some(k8s_cri::v1::ImageSpec {
-    //         image: "docker.io/library/nginx:latest".to_string(),
-    //         annotations: HashMap::new(),
-    //     }),
-    //     auth: None,
-    //     sandbox_config: None,
-    // };
+    let req =   k8s_cri::v1::PullImageRequest {
+        image: Some(k8s_cri::v1::ImageSpec {
+            image: "docker.io/library/nginx:latest".to_string(),
+            annotations: HashMap::new(),
+        }),
+        auth: None,
+        sandbox_config: None,
+    };
 
-    // let resp = client.pull_image(req).await?;
+    let resp = client.pull_image(req).await?;
 
-    // println!("{:?}", resp);
+    println!("pull image response: {:?}\n", resp);
 
-    let req = tonic::Request::new(k8s_cri::v1::ListImagesRequest {
-        filter: None,
-    });
-    let resp = client.list_images(req).await?;
-    println!("{:?}", resp);
+    let req = k8s_cri::v1::ImageStatusRequest {
+        image: Some(k8s_cri::v1::ImageSpec{
+            image: "docker.io/library/nginx:latest".to_string(),
+            annotations: HashMap::new(),
+        }),
+        verbose: true
+    };
+    
+    let image_info = client.image_status(req).await?;
+    // println!("image_status: {:?}\n", image_info);
 
+    let image_layers = image_info.into_inner();
+    // println!("image_layers: {:?}\n", image_layers);
+
+    let status_info = image_layers.info.get("info").unwrap();
+    // println!("rootfs: {:?}\n", status_info);
+
+    let json_value: serde_json::Value = serde_json::from_str(status_info)?;
+    // println!("JSON value: {}\n", json_value);
+
+    let layers = &json_value["imageSpec"]["rootfs"]["diff_ids"];
+    let layerVec: Vec<String> = serde_json::from_value(layers.clone()).unwrap();
+    
+    // println!("layers: {}\n", layers);
+    // println!("layerVec: {:?}\n", layerVec);
+
+    for layer in layerVec {
+        println!("this is a layer: {}", layer);
+    }
 
     // let req = tonic::Request::new(k8s_cri::v1::ImageStatusRequest {
     //     image: Some(k8s_cri::v1::ImageSpec {
@@ -74,27 +97,37 @@ async fn my_async() ->  Result<(), Box<dyn std::error::Error>>{
     // let resp = client.image_fs_info(req).await?;
     // println!("{:?}", resp);
 
-    let containerd_socket = "/var/run/containerd/containerd.sock";
-    info!("Connecting to containerd at {containerd_socket}");
-    let client = match Client::from_path(containerd_socket).await {
-        Ok(c) => {
-            c
-        },
-        Err(e) => {
-            println!("Failed to connect to containerd: {e:?}");
-            process::exit(1);
-        }
-    };
+    // let containerd_socket = "/var/run/containerd/containerd.sock";
+    // info!("Connecting to containerd at {containerd_socket}");
+    // let client = match Client::from_path(containerd_socket).await {
+    //     Ok(c) => {
+    //         c
+    //     },
+    //     Err(e) => {
+    //         println!("Failed to connect to containerd: {e:?}");
+    //         process::exit(1);
+    //     }
+    // };
 
-    let mut imageChannel = client.images();
+    // let mut imageChannel = client.images();
 
-    let req = GetImageRequest{
-        name: "docker.io/library/nginx:latest".to_string()
-    };
-    let req = with_namespace!(req, "default");
-    let resp = imageChannel.get(req).await?;
+
+    // let req = containerd_client::services::v1::ListImagesRequest {
+    //     filters: vec![],
+    // };
+    // let req = with_namespace!(req, "default");
+    // let resp = imageChannel.list(req).await?;
+    // println!("list image response: {:?}\n", resp);
+
+    // let req = GetImageRequest{
+    //     name: "docker.io/library/nginx:latest".to_string()
+    // };
+    // let req = with_namespace!(req, "default");
+    // let resp = imageChannel.get(req).await?;
+    
+    // println!("get image response: {:?}", resp);
+
     // let image = imageChannel.pull(image_ref, None)?;
-    println!("{:?}", resp);
 
     // let req = ReadContentRequest {
     //     digest: "sha256:343e6546f35877801de0b8580274a5e3a8e8464cabe545a2dd9f3c78df77542a".to_string(),
@@ -131,3 +164,4 @@ async fn my_async() ->  Result<(), Box<dyn std::error::Error>>{
     // }
     Ok(())
 }
+
