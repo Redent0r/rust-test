@@ -37,9 +37,11 @@ async fn my_async() ->  Result<(), Box<dyn std::error::Error>>{
 
     let mut client = ImageServiceClient::new(channel);
 
+    let image = "docker.io/library/nginx:latest".to_string();
+
     let req =   k8s_cri::v1::PullImageRequest {
         image: Some(k8s_cri::v1::ImageSpec {
-            image: "docker.io/library/nginx:latest".to_string(),
+            image: image.clone(),
             annotations: HashMap::new(),
         }),
         auth: None,
@@ -52,33 +54,41 @@ async fn my_async() ->  Result<(), Box<dyn std::error::Error>>{
 
     let req = k8s_cri::v1::ImageStatusRequest {
         image: Some(k8s_cri::v1::ImageSpec{
-            image: "docker.io/library/nginx:latest".to_string(),
+            image: image.clone(),
             annotations: HashMap::new(),
         }),
         verbose: true
     };
     
-    let image_info = client.image_status(req).await?;
+    let image_info = client.image_status(req).await?.into_inner();
     // println!("image_status: {:?}\n", image_info);
 
-    let image_layers = image_info.into_inner();
-    // println!("image_layers: {:?}\n", image_layers);
+    // image_info.image.unwrap().repo_digests.iter().for_each(|digest| {
+    //     let x = digest.split('@').collect::<Vec<&str>>();
+    //     println!("digest: {}", x[1]);
+    // });
+    let x = image_info.image.unwrap();
 
-    let status_info = image_layers.info.get("info").unwrap();
+    println!("image: {:#?}\n", x);
+    
+    let imageDigest = x.repo_digests[0].split('@').collect::<Vec<&str>>()[1];
+
+    println!("imageDigest: {}\n", imageDigest);
+    // let status_info = image_info.info.get("info").unwrap();
     // println!("rootfs: {:?}\n", status_info);
 
-    let json_value: serde_json::Value = serde_json::from_str(status_info)?;
+    // let json_value: serde_json::Value = serde_json::from_str(image_info)?;
     // println!("JSON value: {}\n", json_value);
 
-    let layers = &json_value["imageSpec"]["rootfs"]["diff_ids"];
-    let layerVec: Vec<String> = serde_json::from_value(layers.clone()).unwrap();
+    // let layers = &json_value["imageSpec"]["rootfs"]["diff_ids"];
+    // let layerVec: Vec<String> = serde_json::from_value(json_value["imageSpec"]["rootfs"]["diff_ids"].clone()).unwrap();
     
     // println!("layers: {}\n", layers);
     // println!("layerVec: {:?}\n", layerVec);
 
-    for layer in layerVec {
-        println!("this is a layer: {}", layer);
-    }
+    // for layer in layerVec {
+    //     println!("this is a layer: {}", layer);
+    // }
 
     // let req = tonic::Request::new(k8s_cri::v1::ImageStatusRequest {
     //     image: Some(k8s_cri::v1::ImageSpec {
@@ -94,20 +104,18 @@ async fn my_async() ->  Result<(), Box<dyn std::error::Error>>{
     // let req = tonic::Request::new(k8s_cri::v1::ImageFsInfoRequest {
         
     // });
-    // let resp = client.image_fs_info(req).await?;
-    // println!("{:?}", resp);
+    // let resp: tonic::Response<k8s_cri::v1::ImageFsInfoResponse> = client.image_fs_info(req).await?;
+    // println!("fs info: {:?}\n", resp);
 
-    // let containerd_socket = "/var/run/containerd/containerd.sock";
-    // info!("Connecting to containerd at {containerd_socket}");
-    // let client = match Client::from_path(containerd_socket).await {
-    //     Ok(c) => {
-    //         c
-    //     },
-    //     Err(e) => {
-    //         println!("Failed to connect to containerd: {e:?}");
-    //         process::exit(1);
-    //     }
-    // };
+    let client = match Client::from_path(path).await {
+        Ok(c) => {
+            c
+        },
+        Err(e) => {
+            println!("Failed to connect to containerd: {e:?}");
+            process::exit(1);
+        }
+    };
 
     // let mut imageChannel = client.images();
 
@@ -115,7 +123,7 @@ async fn my_async() ->  Result<(), Box<dyn std::error::Error>>{
     // let req = containerd_client::services::v1::ListImagesRequest {
     //     filters: vec![],
     // };
-    // let req = with_namespace!(req, "default");
+    // let req = with_namespace!(req, "k8s.io");
     // let resp = imageChannel.list(req).await?;
     // println!("list image response: {:?}\n", resp);
 
@@ -129,39 +137,37 @@ async fn my_async() ->  Result<(), Box<dyn std::error::Error>>{
 
     // let image = imageChannel.pull(image_ref, None)?;
 
-    // let req = ReadContentRequest {
-    //     digest: "sha256:343e6546f35877801de0b8580274a5e3a8e8464cabe545a2dd9f3c78df77542a".to_string(),
-    //     offset: 0,
-    //     size: 0,
-    // };
-    // let req = with_namespace!(req, "default");
-    // let mut c = client.content();
-    // let resp = c.read(req).await?;
-    // let mut stream = resp.into_inner();
+    let req = ReadContentRequest {
+        digest: imageDigest.to_string(),
+        offset: 0,
+        size: 0,
+    };
+    let req = with_namespace!(req, "k8s.io");
+    let mut c = client.content();
+    let resp = c.read(req).await?;
+    let mut stream = resp.into_inner();
 
-    // let mut file = tokio::fs::File::create("myfile").await?;
-    
-    // while let Some(chunk) = stream.message().await? {
-    //     if chunk.offset < 0 {
-    //         // debug!("Containerd reported a negative offset: {}", chunk.offset);
-    //         // return Err(Status::invalid_argument("negative offset"));
-    //         print!("oop")
-    //     }
-    //     else {
-    //         // file.seek(io::SeekFrom::Start(chunk.offset as u64)).await?;
-    //         // file.write_all(&chunk.data).await?;
-    //         // print!("{:?}", chunk);
-    //         // file.seek(io::SeekFrom::Start(chunk.offset as u64)).await?;
-    //         // file.write_all(&chunk.data).await?;
-    //         let manifest: serde_json::Value = serde_json::from_slice(&chunk.data)?;
-    //         // println!("{:?}", manifest);
-    //         let manifests = manifest["manifests"].as_array().unwrap();
-    //         // println!("{:?}", manifests);
-    //         for m in manifests {
-    //             println!("{}", &m["digest"].as_str().unwrap());
-    //         }
-    //     }
-    // }
+    while let Some(chunk) = stream.message().await? {
+        if chunk.offset < 0 {
+            // debug!("Containerd reported a negative offset: {}", chunk.offset);
+            // return Err(Status::invalid_argument("negative offset"));
+            print!("oop")
+        }
+        else {
+            // file.seek(io::SeekFrom::Start(chunk.offset as u64)).await?;
+            // file.write_all(&chunk.data).await?;
+            // print!("{:?}", chunk);
+            // file.seek(io::SeekFrom::Start(chunk.offset as u64)).await?;
+            // file.write_all(&chunk.data).await?;
+            let manifest: serde_json::Value = serde_json::from_slice(&chunk.data)?;
+            println!("{:#?}", manifest);
+            let manifests = manifest["manifests"].as_array().unwrap();
+            // println!("manifest: {:?}", manifests);
+            for m in manifests {
+                println!("da layer: {}", &m["digest"].as_str().unwrap());
+            }
+        }
+    }
     Ok(())
 }
 
