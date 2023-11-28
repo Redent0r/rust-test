@@ -3,19 +3,15 @@ use containerd_client::{services::v1::ReadContentRequest, tonic::Request, with_n
 use log::{error, info, warn};
 use tokio::runtime::{Runtime};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
-use tokio::sync::RwLock;
-use tonic::Status;
 use std::{env, path::Path, process, sync::Arc};
 use std::{collections::HashMap, fs, fs::OpenOptions, io, io::Seek};
 // use oci_distribution::{manifest, secrets::RegistryAuth, Reference};
 use serde::{Deserialize, Serialize};
-use serde::Deserializer;
 use containerd_client::services::v1::GetImageRequest;
 
 use std::convert::TryFrom;
 use tokio::main;
 
-use k8s_cri::v1alpha2::runtime_service_client::RuntimeServiceClient;
 use tokio::net::UnixStream;
 use tonic::transport::{Channel, Endpoint, Uri};
 use tower::service_fn;
@@ -27,22 +23,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-async fn my_async() ->  Result<(), Box<dyn std::error::Error>>{
-    let path = "/var/run/containerd/containerd.sock";
+async fn pull_image(image_ref: String, socket_path: String) ->  Result<(), Box<dyn std::error::Error>>{
+    let socket = socket_path.clone(); // todo: figure out how not to clone everything to get it working
     let channel = Endpoint::try_from("http://[::]")
         .unwrap()
-        .connect_with_connector(service_fn(move |_: Uri| UnixStream::connect(path)))
+        .connect_with_connector(service_fn(move |_: Uri| UnixStream::connect(socket.clone())))
         .await
         .expect("Could not create client.");
 
     let mut client = ImageServiceClient::new(channel);
 
-    let imageRef = "docker.io/bprashanth/nginxhttps:1.0".to_string();
-    // let imageRef = "docker.io/library/nginx:latest".to_string();
-
     let req =   k8s_cri::v1::PullImageRequest {
         image: Some(k8s_cri::v1::ImageSpec {
-            image: imageRef.clone(),
+            image: image_ref.clone(),
             annotations: HashMap::new(),
         }),
         auth: None,
@@ -52,8 +45,11 @@ async fn my_async() ->  Result<(), Box<dyn std::error::Error>>{
     let resp = client.pull_image(req).await?;
 
     println!("pull image response: {:?}\n", resp);
+    Ok(())
+}
 
-    let client = match Client::from_path(path).await {
+async fn list_image_layers (imageRef: String, socketPath: String) ->  Result<(), Box<dyn std::error::Error>>{
+    let client = match Client::from_path(socketPath).await {
         Ok(c) => {
             c
         },
@@ -70,15 +66,12 @@ async fn my_async() ->  Result<(), Box<dyn std::error::Error>>{
     };
     let req = with_namespace!(req, "k8s.io");
     let resp = imageChannel.get(req).await?;
-    
-    // println!("get image response: {:?}", resp);
 
-    let imageDigest = resp.into_inner().image.unwrap().target.clone().unwrap().digest.to_string();
-    println!("image digest used to query layers: {:?}\n", imageDigest);
-    // let image = imageChannel.pull(image_ref, None)?;
+    let image_digest = resp.into_inner().image.unwrap().target.clone().unwrap().digest.to_string();
+    println!("image digest used to query layers: {:?}\n", image_digest);
 
     let req = ReadContentRequest {
-        digest: imageDigest.to_string(),
+        digest: image_digest.to_string(),
         offset: 0,
         size: 0,
     };
@@ -89,38 +82,40 @@ async fn my_async() ->  Result<(), Box<dyn std::error::Error>>{
 
     while let Some(chunk) = stream.message().await? {
         if chunk.offset < 0 {
-            // debug!("Containerd reported a negative offset: {}", chunk.offset);
-            // return Err(Status::invalid_argument("negative offset"));
             print!("oop")
         }
         else {
-            // file.seek(io::SeekFrom::Start(chunk.offset as u64)).await?;
-            // file.write_all(&chunk.data).await?;
-            // print!("{:?}", chunk);
-            // file.seek(io::SeekFrom::Start(chunk.offset as u64)).await?;
-            // file.write_all(&chunk.data).await?;
             let manifest: serde_json::Value = serde_json::from_slice(&chunk.data)?;
             println!("manifest: {:#?}", manifest);
-            let isv2Manifest = manifest.get("manifests") != None; // v2 has manifest["manifests"]
-            if isv2Manifest {
-                println!("v2 layers");
-                let manifests = manifest["manifests"].as_array().unwrap();
-                // println!("manifest: {:?}", manifests);
-                for m in manifests {
-                    println!("{}", &m["digest"].as_str().unwrap());
-                }
+            let isv2_manifest = manifest.get("manifests") != None; // v2 has manifest["manifests"]
+            
+            let manifests = if isv2_manifest {
+                println!("v2 layers for {}:", imageRef);
+                manifest["manifests"].as_array().unwrap()
             }
             else {
-                println!("v1 layers:");
-                let layers = manifest["layers"].as_array().unwrap();
-                // println!("manifest: {:?}", manifests);
-                for layer in layers {
-                    println!("{}", &layer["digest"].as_str().unwrap());
-                }
+                println!("v1 layers for {}: ", imageRef);
+                manifest["layers"].as_array().unwrap()
+            };
+
+            for entry in manifests {
+                println!("{}", &entry["digest"].as_str().unwrap());
             }
-            
         }
     }
+    Ok(())
+}
+
+async fn my_async() ->  Result<(), Box<dyn std::error::Error>>{
+    let containerd_socket_path = "/var/run/containerd/containerd.sock";
+
+    let image_ref = "docker.io/bprashanth/nginxhttps:1.0".to_string();
+
+    // let image_ref = "docker.io/library/nginx:latest".to_string();
+
+    pull_image(image_ref.clone(), containerd_socket_path.to_string()).await?;
+
+    list_image_layers(image_ref.clone(), containerd_socket_path.to_string()).await?;
     Ok(())
 }
 
