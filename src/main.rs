@@ -37,11 +37,12 @@ async fn my_async() ->  Result<(), Box<dyn std::error::Error>>{
 
     let mut client = ImageServiceClient::new(channel);
 
-    let image = "bprashanth/nginxhttps:1.0".to_string();
+    let imageRef = "docker.io/bprashanth/nginxhttps:1.0".to_string();
+    // let imageRef = "docker.io/library/nginx:latest".to_string();
 
     let req =   k8s_cri::v1::PullImageRequest {
         image: Some(k8s_cri::v1::ImageSpec {
-            image: image.clone(),
+            image: imageRef.clone(),
             annotations: HashMap::new(),
         }),
         auth: None,
@@ -51,73 +52,6 @@ async fn my_async() ->  Result<(), Box<dyn std::error::Error>>{
     let resp = client.pull_image(req).await?;
 
     println!("pull image response: {:?}\n", resp);
-
-    // let req = k8s_cri::v1::ListImagesRequest {
-    //     filter: Some(k8s_cri::v1::ImageFilter {
-    //         image: Some(k8s_cri::v1::ImageSpec {
-    //             image: image.clone(),
-    //             annotations: HashMap::new(),
-    //         }),
-
-    //     }),
-       
-    //  };
-
-    // let resp = client.list_images(req).await?;
-
-    // println!("list image response: {:#?}\n", resp);
-
-    let req = k8s_cri::v1::ImageStatusRequest {
-        image: Some(k8s_cri::v1::ImageSpec{
-            image: image.clone(),
-            annotations: HashMap::new(),
-        }),
-        verbose: true
-    };
-    
-    let image_info = client.image_status(req).await?.into_inner();
-    // println!("image_status: {:?}\n", image_info);
-
-    // image_info.image.unwrap().repo_digests.iter().for_each(|digest| {
-    //     let x = digest.split('@').collect::<Vec<&str>>();
-    //     println!("digest: {}", x[1]);
-    // });
-    let x = image_info.image.unwrap();
-
-    println!("image: {:#?}\n", x);
-    
-    // let status_info = image_info.info.get("info").unwrap();
-    // println!("rootfs: {:?}\n", status_info);
-
-    // let json_value: serde_json::Value = serde_json::from_str(image_info)?;
-    // println!("JSON value: {}\n", json_value);
-
-    // let layers = &json_value["imageSpec"]["rootfs"]["diff_ids"];
-    // let layerVec: Vec<String> = serde_json::from_value(json_value["imageSpec"]["rootfs"]["diff_ids"].clone()).unwrap();
-    
-    // println!("layers: {}\n", layers);
-    // println!("layerVec: {:?}\n", layerVec);
-
-    // for layer in layerVec {
-    //     println!("this is a layer: {}", layer);
-    // }
-
-    // let req = tonic::Request::new(k8s_cri::v1::ImageStatusRequest {
-    //     image: Some(k8s_cri::v1::ImageSpec {
-    //         image: "docker.io/library/nginx:latest".to_string(),
-    //         annotations: HashMap::new(),
-    //     }),
-    //     verbose: false,
-    // });
-    // let resp = client.image_status(req).await?;
-    // println!("{:?}", resp);
-
-
-    // let req = tonic::Request::new(k8s_cri::v1::ImageFsInfoRequest {
-        
-    // });
-    // let resp: tonic::Response<k8s_cri::v1::ImageFsInfoResponse> = client.image_fs_info(req).await?;
-    // println!("fs info: {:?}\n", resp);
 
     let client = match Client::from_path(path).await {
         Ok(c) => {
@@ -131,35 +65,16 @@ async fn my_async() ->  Result<(), Box<dyn std::error::Error>>{
 
     let mut imageChannel = client.images();
 
-
-    let req = containerd_client::services::v1::ListImagesRequest {
-        filters: vec![
-            //"name!=docker.io/bprashanth/nginxhttps:1.0".to_string() //todo: get this filter working
-            ]
+    let req = GetImageRequest{
+        name: imageRef.clone()
     };
-
     let req = with_namespace!(req, "k8s.io");
-    let resp = imageChannel.list(req).await?.into_inner();
-    println!("list image response: {:?}\n", resp);
-
-    let mut imageDigest = String::from("");
-    resp.images.iter().for_each(|image| {
-        println!("image name: {}", image.name);
-        if image.name == "docker.io/library/nginx:latest" {
-            imageDigest = image.target.clone().unwrap().digest.to_string();
-        }
-    });
-
-    println!("the image digest is: {:?}\n", imageDigest);
-
-    // let req = GetImageRequest{
-    //     name: "docker.io/library/nginx:latest".to_string()
-    // };
-    // let req = with_namespace!(req, "default");
-    // let resp = imageChannel.get(req).await?;
+    let resp = imageChannel.get(req).await?;
     
     // println!("get image response: {:?}", resp);
 
+    let imageDigest = resp.into_inner().image.unwrap().target.clone().unwrap().digest.to_string();
+    println!("image digest used to query layers: {:?}\n", imageDigest);
     // let image = imageChannel.pull(image_ref, None)?;
 
     let req = ReadContentRequest {
@@ -185,17 +100,23 @@ async fn my_async() ->  Result<(), Box<dyn std::error::Error>>{
             // file.seek(io::SeekFrom::Start(chunk.offset as u64)).await?;
             // file.write_all(&chunk.data).await?;
             let manifest: serde_json::Value = serde_json::from_slice(&chunk.data)?;
-            println!("manifet: {:#?}", manifest);
-            let isv2Manifest = manifest.get("manifests") != None; // has manifest["manifests"]
+            println!("manifest: {:#?}", manifest);
+            let isv2Manifest = manifest.get("manifests") != None; // v2 has manifest["manifests"]
             if isv2Manifest {
+                println!("v2 layers");
                 let manifests = manifest["manifests"].as_array().unwrap();
                 // println!("manifest: {:?}", manifests);
                 for m in manifests {
-                    println!("da layer: {}", &m["digest"].as_str().unwrap());
+                    println!("{}", &m["digest"].as_str().unwrap());
                 }
             }
             else {
-                println!("v1 detected")
+                println!("v1 layers:");
+                let layers = manifest["layers"].as_array().unwrap();
+                // println!("manifest: {:?}", manifests);
+                for layer in layers {
+                    println!("{}", &layer["digest"].as_str().unwrap());
+                }
             }
             
         }
