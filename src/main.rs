@@ -8,12 +8,36 @@ use tokio::net::UnixStream;
 use tonic::transport::{Endpoint, Uri};
 use tower::service_fn;
 use tonic::Request;
+use serde::{Deserialize, Serialize};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Hello, world!");   
     my_async().await?;
     Ok(())
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct DockerConfigLayer {
+    architecture: String,
+    config: DockerImageConfig,
+    rootfs: DockerRootfs,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct DockerImageConfig {
+    User: Option<String>,
+    Tty: Option<bool>,
+    Env: Vec<String>,
+    Cmd: Option<Vec<String>>,
+    WorkingDir: Option<String>,
+    Entrypoint: Option<Vec<String>>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct DockerRootfs {
+    r#type: String,
+    diff_ids: Vec<String>,
 }
 
 async fn pull_image(image_ref: String, socket_path: String) ->  Result<(), Box<dyn std::error::Error>>{
@@ -85,6 +109,35 @@ async fn get_image_manifest (image_ref: String, socket_path: String) ->  Result<
     Ok(serde_json::Value::Null)
 }
 
+async fn get_config_layer(image_ref: String, socket_path: String) ->  Result<DockerConfigLayer, Box<dyn std::error::Error>>{
+    
+    let socket = socket_path.clone(); // todo: figure out how not to clone everything to get it working
+    let channel = Endpoint::try_from("http://[::]")
+        .unwrap()
+        .connect_with_connector(service_fn(move |_: Uri| UnixStream::connect(socket.clone())))
+        .await
+        .expect("Could not create client.");
+
+    let mut client = ImageServiceClient::new(channel);
+
+    let req =   k8s_cri::v1::ImageStatusRequest {
+        image: Some(k8s_cri::v1::ImageSpec {
+            image: image_ref,
+            annotations: HashMap::new(),
+        }),
+        verbose: true
+    };
+
+    let resp = client.image_status(req).await?;
+    let image_layers = resp.into_inner();
+
+    let status_info: serde_json::Value = serde_json::from_str(image_layers.info.get("info").unwrap())?;
+    let image_spec = status_info["imageSpec"].as_object().unwrap();
+    let docker_config_layer: DockerConfigLayer = serde_json::from_value(serde_json::to_value(image_spec)?).unwrap();
+
+    Ok(docker_config_layer)
+}
+
 async fn my_async() ->  Result<(), Box<dyn std::error::Error>>{
     let containerd_socket_path = "/var/run/containerd/containerd.sock";
 
@@ -94,6 +147,10 @@ async fn my_async() ->  Result<(), Box<dyn std::error::Error>>{
 
     pull_image(image_ref.clone(), containerd_socket_path.to_string()).await?;
 
+    let config_layer: DockerConfigLayer = get_config_layer(image_ref.clone(), containerd_socket_path.to_string()).await?;
+    
+    println!("config_layer: {:#?}", config_layer);
+    
     let manifest = get_image_manifest(image_ref.clone(), containerd_socket_path.to_string()).await?;
     println!("manifest: {:#?}", manifest);
 
