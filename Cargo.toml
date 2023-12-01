@@ -7,12 +7,13 @@ edition = "2021"
 
 [dependencies]
 containerd-client = "0.4.0"
+docker_credential = "1.2.1"
 k8s-cri = "0.7.0"
 log = "0.4.20"
-oci-distribution = { version = "0.9.4" }
+oci-distribution = "0.9.4"
 openssl = { version = "0.10.54", features = ["vendored"] }
 serde = "1.0.189"
 serde_json = "1.0.107"
-tokio = { version = "1.14", features = ["full"] }
+tokio = { version = "1.33", features = ["full"] }
 tonic = "0.9.2"
 tower = "0.4.13"

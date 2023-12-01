@@ -9,6 +9,9 @@ use tonic::transport::{Endpoint, Uri};
 use tower::service_fn;
 use tonic::Request;
 use serde::{Deserialize, Serialize};
+use std::{ fs, fs::OpenOptions, io, io::Seek};
+use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+use docker_credential::{CredentialRetrievalError, DockerCredential};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -103,10 +106,121 @@ async fn get_image_manifest (image_ref: String, socket_path: String) ->  Result<
         }
         else {
             let manifest: serde_json::Value = serde_json::from_slice(&chunk.data)?;
-            return Ok(manifest);
+            let isv1_manifest = manifest.get("layers") != None;
+            if isv1_manifest {
+                return Ok(manifest);
+            }
         }
     }
+
+    // manifest is v2
+
+
     Ok(serde_json::Value::Null)
+}
+
+async fn save_layer_to_file (digest: String) ->  Result<(), Box<dyn std::error::Error>>{
+    let mut file = tokio::fs::File::create("my_file")
+            .await
+            .map_err(|e| println!("{e}")).unwrap();
+    
+    let client = match Client::from_path("/var/run/containerd/containerd.sock").await {
+        Ok(c) => {
+            c
+        },
+        Err(e) => {
+            println!("Failed to connect to containerd: {e:?}");
+            process::exit(1);
+        }
+    };
+
+    let req = ReadContentRequest {
+        digest,
+        offset: 0,
+        size: 0,
+    };
+    let req = with_namespace!(req, "k8s.io");
+    let mut c = client.content();
+    let resp = c.read(req).await?;
+    let mut stream = resp.into_inner();
+
+    while let Some(chunk) = stream.message().await? {
+        if chunk.offset < 0 {
+            print!("oop")
+        }
+        file.seek(io::SeekFrom::Start(chunk.offset as u64)).await?;
+        file.write_all(&chunk.data).await?;
+        // println!("chunk.data: {:?}", chunk.data)
+    }
+    file.flush().await.map_err(|e| println!("{e}")).unwrap();
+    Ok(())
+}
+
+async fn save_layer_to_file_oci (digest: String) ->  Result<(), Box<dyn std::error::Error>>{
+    let image_ref:oci_distribution::Reference = "mcr.microsoft.com/aks/e2e/library-busybox:master.220314.1-linux-amd64".to_string().parse().unwrap();
+    let auth = build_auth(&image_ref);
+
+    let mut client = oci_distribution::Client::new(oci_distribution::client::ClientConfig {
+        platform_resolver: Some(Box::new(oci_distribution::client::linux_amd64_resolver)),
+        ..Default::default()
+    });
+
+    client.auth(&image_ref, &auth, oci_distribution::RegistryOperation::Pull).await?;
+
+    let mut file = tokio::fs::File::create("my_file_oci")
+            .await
+            .map_err(|e| println!("{e}")).unwrap();
+
+    
+    client
+        .pull_blob(&image_ref, &digest, &mut file)
+        .await
+        .map_err(|e| println!("{e}")).unwrap();
+
+    file.flush().await.map_err(|e| println!("{e}")).unwrap();
+
+    Ok(())
+}
+
+fn build_auth(reference: &oci_distribution::Reference) -> oci_distribution::secrets::RegistryAuth {
+    println!("build_auth: {:?}", reference);
+
+    let server = reference
+        .resolve_registry()
+        .strip_suffix("/")
+        .unwrap_or_else(|| reference.resolve_registry());
+
+    match docker_credential::get_credential(server) {
+        Ok(DockerCredential::UsernamePassword(username, password)) => {
+            println!("build_auth: Found docker credentials");
+            return oci_distribution::secrets::RegistryAuth::Basic(username, password);
+        }
+        Ok(DockerCredential::IdentityToken(_)) => {
+            println!("build_auth: Cannot use contents of docker config, identity token not supported. Using anonymous access.");
+        }
+        Err(CredentialRetrievalError::ConfigNotFound) => {
+            println!("build_auth: Docker config not found - using anonymous access.");
+        }
+        Err(CredentialRetrievalError::NoCredentialConfigured) => {
+            println!("build_auth: Docker credentials not configured - using anonymous access.");
+        }
+        Err(CredentialRetrievalError::ConfigReadError) => {
+            println!("build_auth: Cannot read docker credentials - using anonymous access.");
+        }
+        Err(CredentialRetrievalError::HelperFailure { stdout, stderr }) => {
+            if stdout == "credentials not found in native keychain\n" {
+                // On WSL, this error is generated when credentials are not
+                // available in ~/.docker/config.json.
+                println!("build_auth: Docker credentials not found - using anonymous access.");
+            } else {
+                println!("build_auth: Docker credentials not found - using anonymous access. stderr = {}, stdout = {}",
+                    &stderr, &stdout);
+            }
+        }
+        Err(e) => panic!("Error handling docker configuration file: {}", e),
+    }
+
+    oci_distribution::secrets::RegistryAuth::Anonymous
 }
 
 async fn get_config_layer(image_ref: String, socket_path: String) ->  Result<DockerConfigLayer, Box<dyn std::error::Error>>{
@@ -143,7 +257,10 @@ async fn my_async() ->  Result<(), Box<dyn std::error::Error>>{
 
     let image_ref = "docker.io/bprashanth/nginxhttps:1.0".to_string();
 
-    // let image_ref = "docker.io/library/nginx:latest".to_string();
+    let image_ref = "docker.io/library/nginx:latest".to_string();
+    let image_ref = "mcr.microsoft.com/aks/e2e/library-busybox:master.220314.1-linux-amd64".to_string();
+
+    let image_ref = "mcr.microsoft.com/oss/kubernetes/pause:3.6".to_string();
 
     pull_image(image_ref.clone(), containerd_socket_path.to_string()).await?;
 
@@ -168,6 +285,9 @@ async fn my_async() ->  Result<(), Box<dyn std::error::Error>>{
     for entry in manifests {
         println!("{}", &entry["digest"].as_str().unwrap());
     }
+
+    // save_layer_to_file("sha256:3c2cba919283a210665e480bcbf943eaaf4ed87a83f02e81bb286b8bdead0e75".to_string()).await?;
+    // save_layer_to_file_oci("sha256:3c2cba919283a210665e480bcbf943eaaf4ed87a83f02e81bb286b8bdead0e75".to_string()).await?;
     Ok(())
 }
 
