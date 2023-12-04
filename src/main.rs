@@ -68,57 +68,6 @@ async fn pull_image(image_ref: String, socket_path: String) ->  Result<(), Box<d
     Ok(())
 }
 
-async fn get_image_manifest (image_ref: String, socket_path: String) ->  Result<serde_json::Value, Box<dyn std::error::Error>>{
-    let client = match Client::from_path(socket_path).await {
-        Ok(c) => {
-            c
-        },
-        Err(e) => {
-            println!("Failed to connect to containerd: {e:?}");
-            process::exit(1);
-        }
-    };
-
-    let mut imageChannel = client.images();
-
-    let req = GetImageRequest{
-        name: image_ref.clone()
-    };
-    let req = with_namespace!(req, "k8s.io");
-    let resp = imageChannel.get(req).await?;
-
-    let image_digest = resp.into_inner().image.unwrap().target.clone().unwrap().digest.to_string();
-    println!("image digest used to query layers: {:?}\n", image_digest);
-
-    let req = ReadContentRequest {
-        digest: image_digest.to_string(),
-        offset: 0,
-        size: 0,
-    };
-    let req = with_namespace!(req, "k8s.io");
-    let mut c = client.content();
-    let resp = c.read(req).await?;
-    let mut stream = resp.into_inner();
-
-    while let Some(chunk) = stream.message().await? {
-        if chunk.offset < 0 {
-            print!("oop")
-        }
-        else {
-            let manifest: serde_json::Value = serde_json::from_slice(&chunk.data)?;
-            let isv1_manifest = manifest.get("layers") != None;
-            if isv1_manifest {
-                return Ok(manifest);
-            }
-        }
-    }
-
-    // manifest is v2
-
-
-    Ok(serde_json::Value::Null)
-}
-
 async fn save_layer_to_file (digest: String) ->  Result<(), Box<dyn std::error::Error>>{
     let mut file = tokio::fs::File::create("my_file")
             .await
@@ -252,16 +201,115 @@ async fn get_config_layer(image_ref: String, socket_path: String) ->  Result<Doc
     Ok(docker_config_layer)
 }
 
+async fn get_image_manifest (image_ref: String, socket_path: String) ->  Result<serde_json::Value, Box<dyn std::error::Error>>{
+    let client = match Client::from_path(socket_path).await {
+        Ok(c) => {
+            c
+        },
+        Err(e) => {
+            println!("Failed to connect to containerd: {e:?}");
+            process::exit(1);
+        }
+    };
+
+    let mut imageChannel = client.images();
+
+    let req = GetImageRequest{
+        name: image_ref.clone()
+    };
+    let req = with_namespace!(req, "k8s.io");
+    let resp = imageChannel.get(req).await?;
+
+    let image_digest = resp.into_inner().image.unwrap().target.clone().unwrap().digest.to_string();
+    println!("image digest used to query layers: {:?}\n", image_digest);
+
+    let req = ReadContentRequest {
+        digest: image_digest.to_string(),
+        offset: 0,
+        size: 0,
+    };
+    let req = with_namespace!(req, "k8s.io");
+    let mut c = client.content();
+    let resp = c.read(req).await?;
+    let mut stream = resp.into_inner();
+    let mut manifest: serde_json::Value = Default::default();
+    while let Some(chunk) = stream.message().await? {
+        if chunk.offset < 0 {
+            print!("oop")
+        }
+        else {
+            
+            manifest = serde_json::from_slice(&chunk.data)?;
+            let isv1_manifest = manifest.get("layers") != None;
+            if isv1_manifest {
+                println!("v1 layers for {}: ", image_ref);
+                return Ok(manifest);
+            }
+        }
+    }
+
+    println!("v2 manifest for {:#?}\n: ", manifest);
+
+    // manifest is v2
+    let manifest = manifest["manifests"].as_array().unwrap();
+
+    if manifest.len() < 1 {
+        println!("No manifests found for image: {}", image_ref);
+        return Ok(serde_json::Value::Null);
+    }
+
+    // assume amd64 manifest is the first one
+    let mut manifest_amd64 = &manifest[0];
+
+    // iterate manifest to find the amd64 manifest:
+    for entry in manifest {
+        let platform = entry["platform"].as_object().unwrap();
+        let architecture = platform["architecture"].as_str().unwrap();
+        let os = platform["os"].as_str().unwrap();
+        if architecture == "amd64" && os == "linux" {
+            println!("found amd64 linux manifest: {:#?}", entry);
+            manifest_amd64 = entry;
+            break;
+        }
+    }
+
+    let image_digest = manifest_amd64["digest"].as_str().unwrap().to_string();
+    println!("image digest2 used to query layers: {:?}\n", image_digest);
+
+    let req = ReadContentRequest {
+        digest: image_digest.to_string(),
+        offset: 0,
+        size: 0,
+    };
+    let req = with_namespace!(req, "k8s.io");
+    let mut c = client.content();
+    let resp = c.read(req).await?;
+    let mut stream = resp.into_inner();
+    while let Some(chunk) = stream.message().await? {
+        if chunk.offset < 0 {
+            print!("oop")
+        }
+        else {
+            let manifest: serde_json::Value = serde_json::from_slice(&chunk.data)?;
+            return Ok(manifest)
+        }
+    }
+
+    Ok(serde_json::Value::Null)
+}
+
 async fn my_async() ->  Result<(), Box<dyn std::error::Error>>{
     let containerd_socket_path = "/var/run/containerd/containerd.sock";
 
-    let image_ref = "docker.io/bprashanth/nginxhttps:1.0".to_string();
 
-    let image_ref = "docker.io/library/nginx:latest".to_string();
-    let image_ref = "mcr.microsoft.com/aks/e2e/library-busybox:master.220314.1-linux-amd64".to_string();
+    // let image_ref = "docker.io/library/nginx:latest".to_string();
+    // let image_ref = "mcr.microsoft.com/aks/e2e/library-busybox:master.220314.1-linux-amd64".to_string();
+
+    // let image_ref = "docker.io/bprashanth/nginxhttps:1.0".to_string();
 
     let image_ref = "mcr.microsoft.com/oss/kubernetes/pause:3.6".to_string();
 
+    // let image_ref = "docker.io/alpine/socat:1.7.4.3-r0".to_string();
     pull_image(image_ref.clone(), containerd_socket_path.to_string()).await?;
 
     let config_layer: DockerConfigLayer = get_config_layer(image_ref.clone(), containerd_socket_path.to_string()).await?;
@@ -271,16 +319,7 @@ async fn my_async() ->  Result<(), Box<dyn std::error::Error>>{
     let manifest = get_image_manifest(image_ref.clone(), containerd_socket_path.to_string()).await?;
     println!("manifest: {:#?}", manifest);
 
-    let isv2_manifest = manifest.get("manifests") != None; // v2 has manifest["manifests"]
-
-    let manifests = if isv2_manifest {
-        println!("v2 layers for {}:", image_ref);
-        manifest["manifests"].as_array().unwrap()
-    }
-    else {
-        println!("v1 layers for {}: ", image_ref);
-        manifest["layers"].as_array().unwrap()
-    };
+    let manifests = manifest["layers"].as_array().unwrap();
 
     for entry in manifests {
         println!("{}", &entry["digest"].as_str().unwrap());

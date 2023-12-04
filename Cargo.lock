@@ -1172,6 +1172,7 @@ dependencies = [
 name = "rust-test"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "containerd-client",
  "docker_credential",
  "k8s-cri",
